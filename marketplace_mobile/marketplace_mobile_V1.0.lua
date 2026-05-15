@@ -9,177 +9,6 @@ local u8 = encoding.UTF8
 local inicfg = require 'inicfg'
 local directIni = 'marketplace.ini'
 local LOG_FILE = 'marketplace_mobile.log'
--- ============================================================
--- АВТО-ОБНОВЛЕНИЕ
--- ============================================================
-local SCRIPT_VERSION = "V1.0"
-local SCRIPT_NAME    = "marketplace_mobile_" .. SCRIPT_VERSION .. ".lua"
-local UPDATE_CHECK_URL = "https://raw.githubusercontent.com/FREYM1337/forumnick/main/marketplace_mobile/version.txt"
-local UPDATE_BASE_URL  = "https://raw.githubusercontent.com/FREYM1337/forumnick/main/marketplace_mobile/"
-
-local function getScriptSelfPath()
-    -- MoonLoader хранит путь скрипта в thisScript()
-    local ok, path = pcall(thisScript)
-    if ok and path then return path end
-    -- fallback: ищем по имени скрипта
-    return getWorkingDirectory() .. "\\moonloader\\" .. SCRIPT_NAME
-end
-
-local function compareVersions(v1, v2)
-    -- Сравниваем "V1.0" < "V1.1" и т.п.
-    local function parseParts(v)
-        v = v:upper():gsub("^V", "")
-        local parts = {}
-        for p in v:gmatch("%d+") do table.insert(parts, tonumber(p)) end
-        return parts
-    end
-    local p1, p2 = parseParts(v1), parseParts(v2)
-    for i = 1, math.max(#p1, #p2) do
-        local a, b = p1[i] or 0, p2[i] or 0
-        if a < b then return -1 end
-        if a > b then return 1 end
-    end
-    return 0
-end
-
-local function checkAndAutoUpdate()
-    async_http_request:create('json', 'GET', UPDATE_CHECK_URL)
-    :setCallback(function(status_code, res, err)
-        if status_code ~= 200 or type(res) ~= "string" then
-            logError("Проверка обновлений не удалась: " .. tostring(err or status_code))
-            return
-        end
-        local latestVer = res:match("([Vv]?%d+%.%d+[%w%.]*)") 
-        if not latestVer then
-            logError("Не удалось распознать версию из: " .. tostring(res))
-            return
-        end
-        latestVer = latestVer:upper()
-        if not latestVer:find("^V") then latestVer = "V" .. latestVer end
-
-        logInfo("Текущая версия: " .. SCRIPT_VERSION .. " | Последняя: " .. latestVer)
-
-        if compareVersions(SCRIPT_VERSION, latestVer) < 0 then
-            sampAddChatMessage("{ff9900}[Marketplace] Обнаружена новая версия: {ffffff}" .. latestVer ..
-                " {ff9900}(сейчас: {ffffff}" .. SCRIPT_VERSION .. "{ff9900}). Скачиваю...", -1)
-            local newFileName = "marketplace_mobile_" .. latestVer .. ".lua"
-            local downloadUrl = UPDATE_BASE_URL .. newFileName
-            async_http_request:create('json', 'GET', downloadUrl)
-            :setCallback(function(dl_status, dl_res, dl_err)
-                if dl_status ~= 200 or type(dl_res) ~= "string" or #dl_res < 100 then
-                    sampAddChatMessage("{ff0000}[Marketplace] Не удалось скачать обновление: " ..
-                        tostring(dl_err or dl_status), -1)
-                    logError("Не удалось скачать обновление: " .. tostring(dl_err))
-                    return
-                end
-                local savePath = getWorkingDirectory() .. "\\moonloader\\" .. newFileName
-                local f = io.open(savePath, "wb")
-                if not f then
-                    sampAddChatMessage("{ff0000}[Marketplace] Не удалось сохранить файл: " .. savePath, -1)
-                    logError("Не удалось открыть файл для записи: " .. savePath)
-                    return
-                end
-                f:write(dl_res)
-                f:close()
-                sampAddChatMessage("{00ff88}[Marketplace] Обновление скачано: {ffffff}" .. newFileName ..
-                    " {00ff88}| Перезапустите скрипт командой {ffffff}/reloadscript " .. newFileName, -1)
-                logInfo("Обновление сохранено: " .. savePath)
-            end)
-            :send()
-        else
-            logInfo("Обновлений нет, версия актуальна: " .. SCRIPT_VERSION)
-        end
-    end)
-    :send()
-end
-
--- ============================================================
--- ТОКЕН / КЕШИРОВАНИЕ ДЛЯ НОВОГО API
--- ============================================================
-local ARZ_TOKEN_URL   = "https://online.arz-mcr.ru/api/lavkas/token"
-local ARZ_MARKET_URL  = "https://online.arz-mcr.ru/api/_arz/registry-v3"
-local _arzTokenCache  = { token = "", ts = 0 }
-local ARZ_TOKEN_TTL   = 600   -- секунды
-
-local function getArzToken(callback)
-    local now = os.time()
-    if _arzTokenCache.token ~= "" and (now - _arzTokenCache.ts) < ARZ_TOKEN_TTL then
-        callback(_arzTokenCache.token)
-        return
-    end
-    async_http_request:create('json', 'GET', ARZ_TOKEN_URL)
-    :setHeaders({
-        ["Accept"]  = "application/json",
-        ["Origin"]  = "https://online.arz-mcr.ru",
-        ["Referer"] = "https://online.arz-mcr.ru/"
-    })
-    :setCallback(function(status_code, res, err)
-        if status_code == 200 and type(res) == "string" then
-            local ok, parsed = pcall(decodeJson, res)
-            if ok and type(parsed) == "table" and parsed.token then
-                _arzTokenCache.token = tostring(parsed.token)
-                _arzTokenCache.ts    = os.time()
-                logInfo("ARZ token получен: " .. _arzTokenCache.token:sub(1, 12) .. "...")
-                callback(_arzTokenCache.token)
-                return
-            end
-        end
-        logError("Не удалось получить ARZ token: " .. tostring(err or status_code))
-        callback("")
-    end)
-    :send()
-end
-
-local function fetchArzMarketData(token, callback)
-    local headers = {
-        ["Accept"]  = "application/json",
-        ["Origin"]  = "https://online.arz-mcr.ru",
-        ["Referer"] = "https://online.arz-mcr.ru/"
-    }
-    if token and token ~= "" then
-        headers["x-lavka-access-token"] = token
-    end
-    async_http_request:create('json', 'GET', ARZ_MARKET_URL)
-    :setHeaders(headers)
-    :setCallback(function(status_code, res, err)
-        if status_code == 401 then
-            -- Токен протух, сбрасываем и повторяем один раз
-            logInfo("ARZ token устарел, обновляем...")
-            _arzTokenCache.token = ""
-            _arzTokenCache.ts    = 0
-            getArzToken(function(newToken)
-                if newToken == "" then
-                    callback(nil, "Не удалось обновить token")
-                    return
-                end
-                local headers2 = {
-                    ["Accept"]               = "application/json",
-                    ["Origin"]               = "https://online.arz-mcr.ru",
-                    ["Referer"]              = "https://online.arz-mcr.ru/",
-                    ["x-lavka-access-token"] = newToken
-                }
-                async_http_request:create('json', 'GET', ARZ_MARKET_URL)
-                :setHeaders(headers2)
-                :setCallback(function(sc2, res2, err2)
-                    if sc2 == 200 and type(res2) == "string" then
-                        callback(res2, nil)
-                    else
-                        callback(nil, tostring(err2 or sc2))
-                    end
-                end)
-                :send()
-            end)
-            return
-        end
-        if status_code == 200 and type(res) == "string" then
-            callback(res, nil)
-        else
-            callback(nil, tostring(err or status_code))
-        end
-    end)
-    :send()
-end
-
 local ini = inicfg.load(inicfg.load({
     main = {
         notify_enabled_profit = true,
@@ -212,6 +41,17 @@ if FONT_SCALE > 1.8 then FONT_SCALE = 1.8 end
 
 local UI_MIN_WIDTH = 980
 local UI_MIN_HEIGHT = 640
+
+local USE_LAVKA_CACHE_PROXY = true
+local LAVKA_CACHE_PROXY_URL = 'http://192.168.0.18:5000/lavka/registry'
+local LAVKA_DIRECT_MARKET_URL = 'https://api.arz.market/api/getSelectedMarketplace/'
+
+local function getMarketplaceUrl(serverId)
+    if USE_LAVKA_CACHE_PROXY then
+        return LAVKA_CACHE_PROXY_URL
+    end
+    return LAVKA_DIRECT_MARKET_URL .. tostring(serverId or -1)
+end
 
 req = require "requests"
 
@@ -722,10 +562,10 @@ end
 local function tryAuthorizeVipKey(rawKey)
     local normalized = normalizeVipKey(rawKey)
     if normalized == "" then
-        return false, u8("Введите VIP-ключ")
+        return false, u8("Введите действительный VIP-ключ")
     end
     if not isVipKeyValid(normalized) then
-        return false, u8("Ключ недействителен")
+        return false, u8("Неверный VIP-ключ")
     end
 
     ini.main.vip_key = normalized
@@ -922,38 +762,29 @@ local function refreshAllDataInBackground()
         :send()
     end
 
-    getArzToken(function(token)
-        fetchArzMarketData(token, function(res, fetchErr)
-            if type(res) == "string" then
-                local okMarket, parsedMarket = pcall(decodeJson, res)
-                -- Новый API возвращает либо массив, либо {data = [...]}
-                if okMarket then
-                    local rows = nil
-                    if type(parsedMarket) == "table" then
-                        if parsedMarket[1] ~= nil then
-                            rows = parsedMarket
-                        elseif type(parsedMarket.data) == "table" then
-                            rows = parsedMarket.data
-                        end
-                    end
-                    if rows and #rows > 0 then
-                        -- Преобразуем массив лавок в словарь с числовыми ключами (совместимость)
-                        newMarketData = {}
-                        for i, v in ipairs(rows) do
-                            newMarketData[i] = v
-                        end
-                    else
-                        logErrorPrint("refresh market: пустой ответ или неверная структура")
-                    end
+    async_http_request:create('json', 'GET', getMarketplaceUrl(marketServerId))
+    :setCallback(function (status_code, res, err)
+        if status_code == 200 and type(res) == "string" then
+            local okMarket, parsedMarket = pcall(decodeJson, res)
+            if okMarket and type(parsedMarket) == "table" then
+                if parsedMarket.ok == true and type(parsedMarket.data) == "table" then
+                    newMarketData = parsedMarket.data
+                elseif parsedMarket.ok == false then
+                    logErrorPrint("refresh market proxy error", parsedMarket.error or err)
+                elseif next(parsedMarket) ~= nil then
+                    newMarketData = parsedMarket
                 else
-                    logErrorPrint("refresh market decode error", fetchErr)
+                    logErrorPrint("refresh market empty/decode error", err)
                 end
             else
-                logErrorPrint("refresh market fetch error", fetchErr)
+                logErrorPrint("refresh market empty/decode error", err)
             end
-            loadItems()
-        end)
+        else
+            logErrorPrint("refresh market http error", status_code, err)
+        end
+        loadItems()
     end)
+    :send()
 end
 
 local function parseItemId(itemId)
@@ -1100,7 +931,7 @@ local function checkNewArbitrageOpportunities(notify)
 
                 sampAddChatMessage(message, 0xaaaaaa)
             end
-            sampAddChatMessage("Всего: {ffffff}" .. #newOpportunities .. "шт", 0xaaaaaa)
+            sampAddChatMessage("Новые возможности: {ffffff}" .. #newOpportunities .. "", 0xaaaaaa)
         end
     end
 
@@ -1189,7 +1020,7 @@ local function drawCheapItems(cheapItems)
         imgui.SameLine()
         imgui.Text(u8("Средняя: " .. comma_value(math.floor(item.averagePrice)) .. " " .. (item.lavka.serverId == 0 and "VC$" or "SA$")))
 
-        imgui.Text(u8("Лавка " .. item.lavka.LavkaUid .. " (" .. item.lavka.username .. ") - " .. item.count .. " шт."))
+        imgui.Text(u8("Лавка " .. item.lavka.LavkaUid .. " (" .. item.lavka.username .. ") - " .. item.count .. " пїЅпїЅ."))
 
         if i < #cheapItems then
             imgui.Separator()
@@ -1778,7 +1609,7 @@ local function drawLavkaItems(data, prefix, items, counts, prices)
             data.LavkaUid
         )
 
-        imgui.Text(u8(string.format("%s шт. | %s %s",
+        imgui.Text(u8(string.format("%s пїЅпїЅ. | %s %s",
             counts[k], comma_value(prices[k]),
             data.serverId == 0 and "VC$" or "SA$")))
 
@@ -2087,8 +1918,6 @@ local newFrame = imgui.OnFrame(
 function main()
     while not isSampAvailable() do wait(0) end
     logInfo('Script main started')
-    -- Проверяем обновления при каждом запуске
-    checkAndAutoUpdate()
 
     vipAuthorized = (not vipFeatureEnabled) or isVipKeyValid(ini.main.vip_key or "")
     syncServerSelectionWithCurrent()
@@ -2132,34 +1961,34 @@ addEventHandler("onWindowMessage", function (msg, wp, lp)
 end)
 
 function updateMarketData(server, notify)
-    -- server аргумент игнорируется: новый API отдаёт все сервера сразу
-    getArzToken(function(token)
-        fetchArzMarketData(token, function(res, fetchErr)
-            if type(res) == "string" then
-                local ok, parsed = pcall(decodeJson, res)
-                if ok and type(parsed) == "table" then
-                    local rows = nil
-                    if parsed[1] ~= nil then
-                        rows = parsed
-                    elseif type(parsed.data) == "table" then
-                        rows = parsed.data
-                    end
-                    if rows then
-                        local newData = {}
-                        for i, v in ipairs(rows) do newData[i] = v end
-                        market_data = newData
-                        market_data_version = market_data_version + 1
-                    else
-                        logErrorPrint("updateMarketData: пустой/неверный ответ")
-                    end
+    server = server or "-1"
+    async_http_request:create('json', 'GET', getMarketplaceUrl(server))
+    :setCallback(function (status_code, res, err)
+        if status_code == 200 then
+            local ok, parsed = pcall(decodeJson, res)
+            if ok and type(parsed) == "table" then
+                if parsed.ok == true and type(parsed.data) == "table" then
+                    market_data = parsed.data
+                    market_data_version = market_data_version + 1
+                elseif parsed.ok == false then
+                    logErrorPrint("updateMarketData proxy error", parsed.error or err)
+                    return
+                elseif next(parsed) ~= nil then
+                    market_data = parsed
+                    market_data_version = market_data_version + 1
                 else
-                    logErrorPrint("updateMarketData decode error", fetchErr)
+                    logErrorPrint("updateMarketData empty data", status_code, err)
+                    return
                 end
             else
-                logErrorPrint("updateMarketData fetch error", fetchErr)
+                logErrorPrint("updateMarketData decode error", status_code, err)
+                return
             end
-        end)
+        else
+            logErrorPrint(status_code, res, err)
+        end
     end)
+    :send()
 end
 
 --[[
