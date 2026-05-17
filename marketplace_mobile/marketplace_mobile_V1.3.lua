@@ -43,7 +43,7 @@ local UI_MIN_WIDTH = 980
 local UI_MIN_HEIGHT = 640
 
 -- ===== AUTOUPDATE CONFIG =====
-local CURRENT_VERSION = "1.2"
+local CURRENT_VERSION = "1.3"
 local GITHUB_RELEASES_API = "https://api.github.com/repos/Moderator42/marketplace_mobile/releases"
 -- ===== END AUTOUPDATE CONFIG =====
 
