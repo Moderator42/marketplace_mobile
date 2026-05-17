@@ -42,8 +42,13 @@ if FONT_SCALE > 1.8 then FONT_SCALE = 1.8 end
 local UI_MIN_WIDTH = 980
 local UI_MIN_HEIGHT = 640
 
+-- ===== AUTOUPDATE CONFIG =====
+local CURRENT_VERSION = "1.1"
+local GITHUB_RELEASES_API = "https://api.github.com/repos/Moderator42/marketplace_mobile/releases"
+-- ===== END AUTOUPDATE CONFIG =====
+
 local USE_LAVKA_CACHE_PROXY = true
-local LAVKA_CACHE_PROXY_URL = 'http://192.168.0.18:5000/lavka/registry'
+local LAVKA_CACHE_PROXY_URL = 'https://teto.moder42.tech/lavka/registry'
 local LAVKA_DIRECT_MARKET_URL = 'https://api.arz.market/api/getSelectedMarketplace/'
 
 local function getMarketplaceUrl(serverId)
@@ -1020,7 +1025,7 @@ local function drawCheapItems(cheapItems)
         imgui.SameLine()
         imgui.Text(u8("�������: " .. comma_value(math.floor(item.averagePrice)) .. " " .. (item.lavka.serverId == 0 and "VC$" or "SA$")))
 
-        imgui.Text(u8("����� " .. item.lavka.LavkaUid .. " (" .. item.lavka.username .. ") - " .. item.count .. " ��."))
+        imgui.Text(u8("����� " .. item.lavka.LavkaUid .. " (" .. item.lavka.username .. ") - " .. item.count .. " ��."))
 
         if i < #cheapItems then
             imgui.Separator()
@@ -1537,7 +1542,7 @@ local function createItemData(lavka, itemId, price, count, index, isSell)
 
     return {
         item_id = actual_item_id,
-        item_name = string.format("%d. %s%s", lavka.LavkaUid, getItemNameById(itemId), enchant ~= "" and ("(%s)"):format(enchant) or ""),
+        item_name = string.format("%d. %s%s", lavka.LavkaUid, getItemNameById(actual_item_id), enchant ~= "" and ("(%s)"):format(enchant) or ""),
         lavka_uid = lavka.LavkaUid,
         server_id = lavka.serverId,
         price = price,
@@ -1609,7 +1614,7 @@ local function drawLavkaItems(data, prefix, items, counts, prices)
             data.LavkaUid
         )
 
-        imgui.Text(u8(string.format("%s ��. | %s %s",
+        imgui.Text(u8(string.format("%s ��. | %s %s",
             counts[k], comma_value(prices[k]),
             data.serverId == 0 and "VC$" or "SA$")))
 
@@ -1665,24 +1670,30 @@ local function drawSearchResultsColumn(items, id)
     imgui.EndChild()
 end
 
+
 local function searchItems(filtered_list)
     local search_text = u8:decode(ffi.string(search)):nlower()
-    local found_item_ids = findItemsByName(search_text)
-
+    
     search_results = { sell = {}, buy = {} }
 
     for _, lavka in pairs(filtered_list) do
+        -- ����� � �������
         for i, itemId in ipairs(lavka.items_sell) do
             local actual_item_id, enchant = parseItemId(itemId)
-            if table.includes(found_item_ids, actual_item_id) then
+            local item_name = getItemNameById(actual_item_id):nlower()
+            
+            if item_name:find(search_text, 1, true) then
                 local item_data = createItemData(lavka, itemId, lavka.price_sell[i], lavka.count_sell[i], i, true)
                 table.insert(search_results.sell, item_data)
             end
         end
 
+        -- ����� � ������
         for i, itemId in ipairs(lavka.items_buy) do
             local actual_item_id, enchant = parseItemId(itemId)
-            if table.includes(found_item_ids, actual_item_id) then
+            local item_name = getItemNameById(actual_item_id):nlower()
+            
+            if item_name:find(search_text, 1, true) then
                 local item_data = createItemData(lavka, itemId, lavka.price_buy[i], lavka.count_buy[i], i, false)
                 table.insert(search_results.buy, item_data)
             end
@@ -1915,12 +1926,186 @@ local newFrame = imgui.OnFrame(
     end
 )
 
+-- ===== AUTO-UPDATE SYSTEM =====
+local function parseVersion(vStr)
+    -- Превращает "1.0" -> {1, 0}, "2.10" -> {2, 10}
+    local parts = {}
+    for n in tostring(vStr or ""):gmatch("(%d+)") do
+        table.insert(parts, tonumber(n))
+    end
+    return parts
+end
+
+local function isNewerVersion(remoteStr, currentStr)
+    local r = parseVersion(remoteStr)
+    local c = parseVersion(currentStr)
+    local maxLen = math.max(#r, #c)
+    for i = 1, maxLen do
+        local rv = r[i] or 0
+        local cv = c[i] or 0
+        if rv > cv then return true end
+        if rv < cv then return false end
+    end
+    return false
+end
+
+-- getWorkingDirectory() — правильный способ получить папку скриптов в ArzMod.
+-- thisScript().dirPath на Android возвращает путь к самому файлу, а не к папке.
+local function getScriptDir()
+    local dir = getWorkingDirectory():gsub('\\', '/')
+    if dir:sub(-1) ~= '/' then dir = dir .. '/' end
+    return dir
+end
+
+-- Запускается в effil-потоке (отдельный Lua state, без upvalues).
+-- Использует socket.http + ltn12 — как Arizona_Helper на мобилке.
+-- socket.http следует редиректам (301/302) автоматически, в отличие от lua-requests.
+-- Пишет файл напрямую через ltn12.sink.file — без буферизации в памяти.
+local function downloadToFileViaSocket(url, destPath)
+    local http  = require('socket.http')
+    local ltn12 = require('ltn12')
+
+    local f, ferr = io.open(destPath, 'wb')
+    if not f then
+        return false, 'io.open failed: ' .. tostring(ferr)
+    end
+
+    local ok, code, _, _ = http.request{
+        method  = 'GET',
+        url     = url,
+        sink    = ltn12.sink.file(f),
+        headers = { ['user-agent'] = 'marketplace_mobile-autoupdate/lua' }
+    }
+    -- ltn12.sink.file закрывает f сам после записи
+
+    if not ok then
+        os.remove(destPath)
+        return false, 'socket.http error: ' .. tostring(code)
+    end
+    if tonumber(code) ~= 200 then
+        os.remove(destPath)
+        return false, 'HTTP ' .. tostring(code)
+    end
+
+    return true, nil
+end
+
+local function performUpdate(newVersion, assetName, downloadUrl)
+    logInfo("Autoupdate: start download " .. tostring(assetName) .. " | " .. tostring(downloadUrl))
+    sampAddChatMessage(u8("[MarketHelper] Downloading update v" .. tostring(newVersion) .. "..."), 0xFFAA00)
+
+    local scriptDir = getScriptDir()
+    local newPath   = scriptDir .. assetName
+    local oldPath   = thisScript().path
+
+    logInfo("Autoupdate: new file path: " .. tostring(newPath))
+    logInfo("Autoupdate: old file path: " .. tostring(oldPath))
+
+    local thread = effil.thread(downloadToFileViaSocket)(downloadUrl, newPath)
+
+    lua_thread.create(function()
+        while true do
+            wait(300)
+            local status, threadErr = thread:status()
+            if not status or threadErr then
+                logErrorPrint("Autoupdate: effil thread failed", tostring(threadErr))
+                sampAddChatMessage(u8("[MarketHelper] Download thread error!"), 0xFF4444)
+                return
+            end
+
+            if status == 'completed' or status == 'canceled' then
+                local ok, dlErr = thread:get()
+                if not ok then
+                    logErrorPrint("Autoupdate: download failed", tostring(dlErr))
+                    sampAddChatMessage(u8("[MarketHelper] Download error: " .. tostring(dlErr or "unknown")), 0xFF4444)
+                    return
+                end
+
+                logInfo("Autoupdate: file saved: " .. tostring(newPath))
+
+                if oldPath ~= newPath then
+                    local removed = os.remove(oldPath)
+                    logInfo("Autoupdate: old file " .. (removed and "removed" or "not removed") .. ": " .. tostring(oldPath))
+                end
+
+                sampAddChatMessage(u8("[MarketHelper] Update v" .. tostring(newVersion) .. " installed! Use /reloadscripts"), 0x44FF44)
+                logInfo("Autoupdate: v" .. tostring(newVersion) .. " installed")
+                return
+            end
+        end
+    end)
+end
+
+local function checkForUpdates()
+    logInfo("Autoupdate: checking updates (current v" .. tostring(CURRENT_VERSION) .. ")")
+
+    async_http_request:create('json', 'GET', GITHUB_RELEASES_API)
+    :setHeaders({
+        ['User-Agent'] = 'marketplace_mobile-autoupdate/lua',
+        ['Accept'] = 'application/vnd.github+json'
+    })
+    :setCallback(function(status_code, res, err)
+        if status_code ~= 200 or type(res) ~= 'string' then
+            logErrorPrint("Autoupdate: GitHub API error", status_code, err)
+            return
+        end
+
+        local ok, releases = pcall(decodeJson, res)
+        if not ok or type(releases) ~= 'table' or #releases == 0 then
+            logErrorPrint("Autoupdate: failed to parse releases JSON")
+            return
+        end
+
+        local latest = releases[1]
+        local remoteVer = tostring(latest.name or "")
+        if remoteVer == "" then
+            logErrorPrint("Autoupdate: empty release name")
+            return
+        end
+
+        logInfo("Autoupdate: GitHub v" .. remoteVer .. ", local v" .. tostring(CURRENT_VERSION))
+
+        if not isNewerVersion(remoteVer, CURRENT_VERSION) then
+            logInfo("Autoupdate: no update required")
+            return
+        end
+
+        local assets = latest.assets or {}
+        local dlUrl, assetName
+        for _, asset in ipairs(assets) do
+            if type(asset.name) == 'string' and asset.name:lower():match("%.lua$") then
+                dlUrl = asset.browser_download_url
+                assetName = asset.name
+                break
+            end
+        end
+
+        if not dlUrl then
+            logErrorPrint("Autoupdate: .lua asset not found in release v" .. remoteVer)
+            return
+        end
+
+        logInfo("Autoupdate: update found v" .. tostring(CURRENT_VERSION) .. " -> v" .. remoteVer .. " (" .. tostring(assetName) .. ")")
+        sampAddChatMessage(u8("[MarketHelper] Update available: v" .. tostring(CURRENT_VERSION) .. " -> v" .. remoteVer), 0xFFCC00)
+
+        performUpdate(remoteVer, assetName, dlUrl)
+    end)
+    :send()
+end
+-- ===== END AUTO-UPDATE SYSTEM =====
+
 function main()
     while not isSampAvailable() do wait(0) end
     logInfo('Script main started')
 
     vipAuthorized = (not vipFeatureEnabled) or isVipKeyValid(ini.main.vip_key or "")
     syncServerSelectionWithCurrent()
+
+    -- Проверка обновлений через 3 сек после старта (чтобы SAMP успел инициализироваться)
+    lua_thread.create(function()
+        wait(3000)
+        checkForUpdates()
+    end)
 
     sampRegisterChatCommand('market', function()
         local opening = not renderWindow[0]
@@ -2086,7 +2271,20 @@ function findItemsByName(name)
 end
 
 function getItemNameById(itemId)
-    return items_data[tonumber(itemId)] or ":item"..itemId..":"
+    local numId = tonumber(itemId)
+    if numId and items_data[numId] then
+        return items_data[numId]
+    end
+
+    if type(itemId) == "string" and itemId ~= "" then
+        local ok, decoded = pcall(function() return u8:decode(itemId) end)
+        if ok and type(decoded) == "string" and decoded ~= "" then
+            return decoded
+        end
+        return itemId
+    end
+
+    return ":item" .. tostring(itemId) .. ":"
 end
 
 function sampev.onConnectionRequestAccepted(ip, port, playerId, challenge)
